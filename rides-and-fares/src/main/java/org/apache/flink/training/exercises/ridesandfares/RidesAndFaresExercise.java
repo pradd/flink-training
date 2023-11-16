@@ -19,8 +19,11 @@
 package org.apache.flink.training.exercises.ridesandfares;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.RichCoFlatMapFunction;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
@@ -45,7 +48,9 @@ public class RidesAndFaresExercise {
     private final SourceFunction<TaxiFare> fareSource;
     private final SinkFunction<RideAndFare> sink;
 
-    /** Creates a job using the sources and sink provided. */
+    /**
+     * Creates a job using the sources and sink provided.
+     */
     public RidesAndFaresExercise(
             SourceFunction<TaxiRide> rideSource,
             SourceFunction<TaxiFare> fareSource,
@@ -59,8 +64,8 @@ public class RidesAndFaresExercise {
     /**
      * Creates and executes the pipeline using the StreamExecutionEnvironment provided.
      *
-     * @throws Exception which occurs during job execution.
      * @return {JobExecutionResult}
+     * @throws Exception which occurs during job execution.
      */
     public JobExecutionResult execute() throws Exception {
 
@@ -71,7 +76,7 @@ public class RidesAndFaresExercise {
                 env.addSource(rideSource).filter(ride -> ride.isStart).keyBy(ride -> ride.rideId);
 
         // A stream of taxi fare events, also keyed by rideId.
-        DataStream<TaxiFare> fares = env.addSource(fareSource).keyBy(fare -> fare.rideId);
+        KeyedStream<TaxiFare, Long> fares = env.addSource(fareSource).keyBy(fare -> fare.rideId);
 
         // Create the pipeline.
         rides.connect(fares).flatMap(new EnrichmentFunction()).addSink(sink);
@@ -99,19 +104,46 @@ public class RidesAndFaresExercise {
     public static class EnrichmentFunction
             extends RichCoFlatMapFunction<TaxiRide, TaxiFare, RideAndFare> {
 
+        private ValueState<TaxiFare> fareState;
+        private ValueState<TaxiRide> startRideState;
+
         @Override
         public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+            ValueStateDescriptor<TaxiFare> fareDescriptor = new ValueStateDescriptor<>(
+                    "fare",
+                    TaxiFare.class);
+            ValueStateDescriptor<TaxiRide> startRideDescriptor = new ValueStateDescriptor<>(
+                    "start ride",
+                    TaxiRide.class);
+
+            fareState = getRuntimeContext().getState(fareDescriptor);
+            startRideState = getRuntimeContext().getState(startRideDescriptor);
         }
 
         @Override
         public void flatMap1(TaxiRide ride, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+            if (!ride.isStart) {
+                return; // totally skipping end ride events
+            }
+
+            if (fareState.value() != null) {
+                out.collect(new RideAndFare(ride, fareState.value()));
+                fareState.clear();
+                startRideState.clear();
+            } else {
+                startRideState.update(ride);
+            }
         }
 
         @Override
         public void flatMap2(TaxiFare fare, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+            if (startRideState.value() != null) {
+                out.collect(new RideAndFare(startRideState.value(), fare));
+                fareState.clear();
+                startRideState.clear();
+            } else {
+                fareState.update(fare);
+            }
         }
     }
 }
