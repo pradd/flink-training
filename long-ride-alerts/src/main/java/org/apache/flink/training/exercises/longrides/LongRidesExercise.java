@@ -18,9 +18,12 @@
 
 package org.apache.flink.training.exercises.longrides;
 
+
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -30,7 +33,6 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
@@ -98,17 +100,80 @@ public class LongRidesExercise {
     @VisibleForTesting
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
 
+        private ValueState<TaxiRide> rideState;
+        private ValueState<Long> timer;
+
+        private static final long timerTimeMs = 2 * 60 * 60 * 1000; // 2 hours
+
         @Override
         public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+            rideState =
+                    getRuntimeContext()
+                            .getState(new ValueStateDescriptor<>("saved ride", TaxiRide.class));
+            timer =
+                    getRuntimeContext()
+                            .getState(new ValueStateDescriptor<>("timer", Long.class));
         }
 
         @Override
         public void processElement(TaxiRide ride, Context context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+
+            TaxiRide stored = rideState.value();
+
+            if (stored != null && stored.isStart) {
+                // ride is finished
+                TaxiRide start = stored;
+                TaxiRide end = ride;
+
+                Duration rideDuration = Duration.between(start.eventTime, end.eventTime);
+                if (rideDuration.compareTo(Duration.ofHours(2)) > 0) {
+                    out.collect(start.rideId);
+                }
+                rideState.clear();
+                context.timerService().deleteEventTimeTimer(timer.value());
+                timer.clear();
+            }
+
+            if (stored != null && !stored.isStart) {
+                // ride is finished
+                TaxiRide start = ride;
+                TaxiRide end = stored;
+
+                Duration rideDuration = Duration.between(start.eventTime, end.eventTime);
+                if (rideDuration.compareTo(Duration.ofHours(2)) > 0) {
+                    out.collect(start.rideId);
+                }
+                rideState.clear();
+                timer.clear();
+            }
+
+            if (stored == null && !ride.isStart) {
+                // ride is END but no START yet
+                TaxiRide start = null;
+                TaxiRide end = ride;
+
+                rideState.update(ride);
+            }
+
+            if (stored == null && ride.isStart) {
+                // ride is START but no END yet
+                TaxiRide start = ride;
+                TaxiRide end = null;
+
+                rideState.update(ride);
+                long timerTimestampToFireMs = ride.eventTime.toEpochMilli() + Duration.ofHours(2).toMillis();
+                context.timerService().registerEventTimeTimer(timerTimestampToFireMs);
+                timer.update(timerTimestampToFireMs);
+            }
+        }
 
         @Override
         public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            out.collect(rideState.value().rideId);
+            rideState.clear();
+            timer.clear();
+        }
     }
 }
